@@ -1,0 +1,107 @@
+# CI библиотеки hockey-libs.
+#
+# Деплоя здесь нет и быть не может: это модуль, а не сервис. На сервер он
+# попадает внутри образов — сервисы собираются вместе со своей версией libs.
+# Поэтому workflow заканчивается проверками, без job'ов image и deploy.
+#
+# Отсюда же следует, как сюда попадают изменения: сервисы тянут libs по тегу
+# (сейчас v0.1.0), значит после слияния в main нужен новый тег, иначе сборки
+# сервисов останутся на прежней версии.
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Проверки
+    runs-on: ubuntu-latest
+
+    # Postgres нужен не всему пакету, а одному тесту: outbox проверяется на
+    # настоящей базе, потому что он держится на FOR UPDATE SKIP LOCKED и на
+    # проверке «Claim отдаёт строку один раз». Без DSN такой тест просто
+    # пропускается, то есть молча перестаёт что-либо проверять, — поэтому в CI
+    # база есть.
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: hockey_libs
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Зависимости
+        run: go mod download
+
+      - name: go.mod и go.sum в согласованном виде
+        run: |
+          go mod tidy
+          if ! git diff --quiet --exit-code go.mod go.sum; then
+            echo "::error::go mod tidy меняет go.mod/go.sum — закоммитьте результат"
+            git diff go.mod go.sum
+            exit 1
+          fi
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt не применён к файлам:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+
+      - name: Тесты
+        # OUTBOX_TEST_DSN — имя из самого теста, не общее DATABASE_URL:
+        # библиотека не знает ни про один сервис и строку подключения из
+        # окружения сама не читает. search_path тут не нужен — миграции outbox
+        # не указывают схему и лягут в public, а platform появляется уже в
+        # базах сервисов.
+        env:
+          OUTBOX_TEST_DSN: postgres://postgres:postgres@localhost:5432/hockey_libs?sslmode=disable
+        run: go test -race -shuffle=on ./...
+
+      - name: Сборка утилит из образов сервисов
+        # cmd/healthcheck попадает в каждый образ: distroless без shell, и
+        # healthcheck в compose вызывает именно этот бинарник. Если он
+        # перестанет собираться, узнать об этом лучше здесь, а не на шаге
+        # сборки образа в четырёх репозиториях сразу.
+        run: go build -o /tmp/libs-cmd/ ./cmd/...
