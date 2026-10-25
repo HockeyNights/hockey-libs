@@ -40,7 +40,7 @@ func NormalizeImage(r io.Reader, opts ImageOptions) ([]byte, error) {
 		opts.Quality = defaultQuality
 	}
 
-	var source io.Reader = r
+	source := r
 	if opts.MaxBytes > 0 {
 		source = io.LimitReader(r, opts.MaxBytes+1)
 	}

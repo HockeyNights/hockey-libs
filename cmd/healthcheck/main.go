@@ -13,7 +13,10 @@ func main() {
 
 	client := &http.Client{Timeout: 3 * time.Second}
 
-	response, err := client.Get(os.Args[1])
+	// Адрес берётся из аргумента командной строки: healthcheck для этого и
+	// существует, его вызывает docker compose со своим же URL. Внешнего ввода
+	// здесь нет, поэтому SSRF-предупреждение неприменимо.
+	response, err := client.Get(os.Args[1]) // #nosec G704
 	if err != nil {
 		os.Exit(1)
 	}
